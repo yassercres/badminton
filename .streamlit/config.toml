@@ -1,0 +1,14 @@
+# Makes the app feel more like a native app when installed to a home screen.
+
+[client]
+# Hide the developer toolbar/hamburger menu for a cleaner, app-like view.
+toolbarMode = "minimal"
+showErrorDetails = false
+
+[theme]
+base = "light"
+primaryColor = "#0f766e"          # badminton green — matches the match card
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f1f5f9"
+textColor = "#0f172a"
+font = "sans serif"
