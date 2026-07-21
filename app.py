@@ -15,6 +15,7 @@ Secrets (password + Supabase creds) come from .streamlit/secrets.toml — see se
 from __future__ import annotations
 
 import datetime as dt
+import urllib.parse
 
 import streamlit as st
 from supabase import create_client, Client
@@ -23,6 +24,7 @@ from supabase import create_client, Client
 # Config
 # --------------------------------------------------------------------------- #
 TABLE = "badminton_schedule"
+BOOKINGS_TABLE = "bookings"
 
 # The group plays at a couple of fixed venues. Name -> Yandex Maps link.
 VENUES: dict[str, str] = {
@@ -30,6 +32,22 @@ VENUES: dict[str, str] = {
     "Park Kultury NLBC": "https://yandex.com/maps/-/CTV8MYoM",
 }
 OTHER_OPTION = "Other (type manually)"
+
+# Court-booking (bc-newliga.ru). Each venue uses a different booking widget, so
+# it has its own URL-parameter prefix and studio id. We inject the chosen date
+# so the booking page opens with the right day pre-selected.
+BOOKING_BASE = "https://bc-newliga.ru/"
+BOOKING_CITY = "Москва"  # Moscow
+VENUE_BOOKING: dict[str, dict[str, str]] = {
+    "Luzhniki NLBC": {
+        "prefix": "prioritypersonal",
+        "studio": "461085c7-4f37-4e1e-9a20-cbc0ab51369d",
+    },
+    "Park Kultury NLBC": {
+        "prefix": "bookingChaika",
+        "studio": "839939cc-2d9e-4ac9-b901-383d755a45a4",
+    },
+}
 
 st.set_page_config(
     page_title="BadBoyz Club — Next Match",
@@ -134,12 +152,54 @@ def save_match(venue: str, match_date: dt.date, match_time: dt.time) -> None:
         client.table(TABLE).insert(payload).execute()
 
 
+def load_bookings() -> tuple[list[dict], bool]:
+    """Return (rows, table_ready). table_ready is False if `bookings` is missing."""
+    try:
+        client = get_client()
+        resp = client.table(BOOKINGS_TABLE).select("*").order("match_date").execute()
+        return resp.data or [], True
+    except Exception:  # noqa: BLE001 — table not created yet, or transient error
+        return [], False
+
+
+def add_booking(match_date: dt.date, venue: str, booked_by: str, note: str) -> None:
+    client = get_client()
+    client.table(BOOKINGS_TABLE).insert(
+        {
+            "match_date": match_date.isoformat(),
+            "venue": venue,
+            "booked_by": booked_by,
+            "note": note or None,
+        }
+    ).execute()
+
+
+def delete_booking(booking_id: int) -> None:
+    client = get_client()
+    client.table(BOOKINGS_TABLE).delete().eq("id", booking_id).execute()
+
+
 # --------------------------------------------------------------------------- #
 # Formatting helpers
 # --------------------------------------------------------------------------- #
 def map_url(venue: str | None) -> str | None:
     """Return the Yandex Maps link for a known venue, else None."""
     return VENUES.get((venue or "").strip())
+
+
+def booking_url(venue: str | None, date: dt.date) -> str | None:
+    """Build the bc-newliga.ru booking link for a venue with the date pre-filled."""
+    cfg = VENUE_BOOKING.get((venue or "").strip())
+    if not cfg:
+        return None
+    prefix = cfg["prefix"]
+    params = [
+        ("abonements_studioId", "all"),
+        (f"{prefix}_date", date.isoformat()),
+        (f"{prefix}_studioId", cfg["studio"]),
+        (f"{prefix}_city", BOOKING_CITY),
+    ]
+    return f"{BOOKING_BASE}?{urllib.parse.urlencode(params)}#{prefix}"
 
 
 def pretty_date(value: str | None) -> str:
@@ -338,6 +398,87 @@ def render_login() -> None:
                 st.error("Incorrect password.")
 
 
+def render_booking(match: dict | None) -> None:
+    match = match or {}
+    st.subheader("📅 Book a court")
+    st.caption(
+        "Pick a venue and date, open the booking site (with your date pre-filled), "
+        "and pay there. Then log it below so everyone can see what's booked."
+    )
+
+    venue_names = list(VENUE_BOOKING.keys())
+    current_venue = match.get("venue")
+    v_index = venue_names.index(current_venue) if current_venue in venue_names else 0
+
+    col1, col2 = st.columns(2)
+    with col1:
+        venue = st.selectbox("Venue", venue_names, index=v_index, key="book_venue")
+    with col2:
+        date = st.date_input("Date", value=parse_date(match.get("date")), key="book_date")
+
+    url = booking_url(venue, date)
+    if url:
+        st.link_button(
+            f"🎟️ Open booking page — {date.strftime('%d %b %Y')}",
+            url,
+            use_container_width=True,
+        )
+        st.caption("Opens bc-newliga.ru with your date selected. Complete payment on their site.")
+
+    st.divider()
+    render_booking_records(match)
+
+
+def render_booking_records(match: dict | None) -> None:
+    match = match or {}
+    rows, ready = load_bookings()
+    if not ready:
+        st.info("Booking records aren't enabled yet — run `db/bookings.sql` in Supabase to turn this on.")
+        return
+
+    venue_names = list(VENUE_BOOKING.keys())
+    cur = match.get("venue")
+    idx = venue_names.index(cur) if cur in venue_names else 0
+
+    with st.expander("✅ Log a booking (after you've paid)"):
+        with st.form("log_booking"):
+            bvenue = st.selectbox("Venue", venue_names, index=idx, key="log_venue")
+            bdate = st.date_input("Date", value=parse_date(match.get("date")), key="log_date")
+            who = st.text_input("Booked by")
+            note = st.text_input("Note (court no., time, cost…)", value="")
+            ok = st.form_submit_button("Save booking")
+        if ok:
+            if not who.strip():
+                st.error("Please add who booked it.")
+            else:
+                try:
+                    add_booking(bdate, bvenue, who.strip(), note.strip())
+                    st.success("Booking logged! ✅")
+                    st.rerun()
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Could not save: {exc}")
+
+    st.markdown("**📋 Upcoming booked sessions**")
+    today = dt.date.today().isoformat()
+    upcoming = [r for r in rows if (r.get("match_date") or "") >= today]
+    if not upcoming:
+        st.caption("No upcoming bookings logged yet.")
+        return
+
+    for r in upcoming:
+        c1, c2 = st.columns([6, 1])
+        with c1:
+            sub = " · ".join(x for x in [r.get("booked_by"), r.get("note")] if x)
+            st.markdown(
+                f"**{pretty_date(r.get('match_date'))}** — {r.get('venue')}"
+                + (f"  \n_{sub}_" if sub else "")
+            )
+        with c2:
+            if st.session_state.get("is_admin") and st.button("🗑️", key=f"del_{r['id']}"):
+                delete_booking(r["id"])
+                st.rerun()
+
+
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
@@ -361,17 +502,22 @@ def main() -> None:
         st.error(f"Couldn't reach the database: {exc}")
         st.stop()
 
-    render_card(match)
-    st.divider()
+    tab_match, tab_book = st.tabs(["🏸 Next Match", "📅 Book a Court"])
 
-    if st.session_state.is_admin:
-        st.success("Admin Mode 🔓")
-        render_admin_editor(match)
-        if st.button("Log out"):
-            st.session_state.is_admin = False
-            st.rerun()
-    else:
-        render_login()
+    with tab_match:
+        render_card(match)
+        st.divider()
+        if st.session_state.is_admin:
+            st.success("Admin Mode 🔓")
+            render_admin_editor(match)
+            if st.button("Log out"):
+                st.session_state.is_admin = False
+                st.rerun()
+        else:
+            render_login()
+
+    with tab_book:
+        render_booking(match)
 
 
 if __name__ == "__main__":
