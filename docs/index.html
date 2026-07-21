@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>BadBoyz Club</title>
+
+  <!-- PWA: this manifest + icons are what give the installed app its custom
+       name ("BadBoyz Club") and BB icon, instead of Streamlit's defaults. -->
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <meta name="theme-color" content="#0f766e" />
+  <link rel="icon" href="./favicon.png" />
+
+  <!-- iOS home-screen support -->
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="BadBoyz Club" />
+
+  <style>
+    html, body { margin: 0; height: 100%; background: #0f766e; }
+    #app { position: fixed; inset: 0; }
+    #app iframe { width: 100%; height: 100%; border: 0; }
+    /* Simple splash while the app loads */
+    #splash {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 1rem;
+      background: #0f766e; color: #fff; font-family: system-ui, sans-serif;
+      transition: opacity .4s ease; z-index: 2;
+    }
+    #splash img { width: 96px; height: 96px; border-radius: 20px; }
+    #splash .t { font-weight: 800; font-size: 1.3rem; }
+    #splash .s { opacity: .8; font-size: .9rem; }
+    a.fallback { color: #fff; text-decoration: underline; font-size: .85rem; }
+  </style>
+</head>
+<body>
+  <div id="splash">
+    <img src="./icon-512.png" alt="BadBoyz Club" />
+    <div class="t">BadBoyz Club</div>
+    <div class="s">Loading your next match…</div>
+  </div>
+  <div id="app"></div>
+
+  <script>
+    // ── CONFIG ────────────────────────────────────────────────────────────
+    // Set this to your deployed Streamlit app URL (the https://…streamlit.app link).
+    const APP_URL = "https://YOUR-APP.streamlit.app";
+    // "embed" = cleanest, app runs inside this page. "redirect" = most robust.
+    const MODE = "embed";
+    // ──────────────────────────────────────────────────────────────────────
+
+    if (MODE === "redirect") {
+      location.replace(APP_URL);
+    } else {
+      const iframe = document.createElement("iframe");
+      iframe.src = APP_URL + (APP_URL.includes("?") ? "&" : "?") + "embed=true";
+      iframe.allow = "clipboard-write; geolocation";
+      iframe.addEventListener("load", () => {
+        const splash = document.getElementById("splash");
+        splash.style.opacity = "0";
+        setTimeout(() => splash.remove(), 400);
+      });
+      document.getElementById("app").appendChild(iframe);
+
+      // If it hasn't loaded after 8s (e.g. embedding blocked), offer a direct link.
+      setTimeout(() => {
+        const splash = document.getElementById("splash");
+        if (splash && document.body.contains(splash)) {
+          const a = document.createElement("a");
+          a.href = APP_URL; a.className = "fallback";
+          a.textContent = "Taking too long? Open the app directly →";
+          splash.appendChild(a);
+        }
+      }, 8000);
+    }
+
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("./sw.js").catch(() => {});
+    }
+  </script>
+</body>
+</html>
