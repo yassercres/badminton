@@ -4,6 +4,7 @@
 -- "next match" and lists the rest. Adds a cost column and a delete policy.
 
 alter table badminton_schedule add column if not exists cost numeric;
+alter table badminton_schedule add column if not exists paid_by text;
 alter table badminton_schedule add column if not exists note text;
 
 -- Allow the app (anon/publishable key) to delete sessions.

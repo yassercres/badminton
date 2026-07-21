@@ -140,22 +140,33 @@ def next_session(sessions: list[dict]) -> dict | None:
     return up[0] if up else None
 
 
-def _session_payload(date: dt.date, time: dt.time, venue: str, cost: float, note: str) -> dict:
+def _session_payload(
+    date: dt.date, time: dt.time, venue: str, cost: float, paid_by: str, note: str
+) -> dict:
     return {
         "date": date.isoformat(),
         "time": time.strftime("%H:%M:%S"),
         "venue": venue,
         "cost": float(cost) if cost else None,
+        "paid_by": paid_by or None,
         "note": note or None,
     }
 
 
-def add_session(date: dt.date, time: dt.time, venue: str, cost: float, note: str) -> None:
-    get_client().table(TABLE).insert(_session_payload(date, time, venue, cost, note)).execute()
+def add_session(
+    date: dt.date, time: dt.time, venue: str, cost: float, paid_by: str, note: str
+) -> None:
+    get_client().table(TABLE).insert(
+        _session_payload(date, time, venue, cost, paid_by, note)
+    ).execute()
 
 
-def update_session(sid: int, date: dt.date, time: dt.time, venue: str, cost: float, note: str) -> None:
-    get_client().table(TABLE).update(_session_payload(date, time, venue, cost, note)).eq("id", sid).execute()
+def update_session(
+    sid: int, date: dt.date, time: dt.time, venue: str, cost: float, paid_by: str, note: str
+) -> None:
+    get_client().table(TABLE).update(
+        _session_payload(date, time, venue, cost, paid_by, note)
+    ).eq("id", sid).execute()
 
 
 def delete_session(sid: int) -> None:
@@ -258,23 +269,28 @@ def render_card(session: dict | None) -> None:
                 <span class="countdown-pill">No match scheduled</span>
                 <div class="row"><span class="ic">🗓️</span>
                     <span><span class="label">Next match</span>
-                    <span class="value">Nothing booked yet</span></span></div>
+                    <span class="value">No sessions booked yet</span></span></div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+        st.info("🏸 Nothing on the calendar right now. Book a court from the **Book a Court** tab, then add it as a session.")
         return
 
     venue = session.get("venue") or "TBD"
     url = map_url(venue)
     venue_html = f'<a href="{url}" target="_blank">{venue} ↗</a>' if url else venue
-    cost = pretty_cost(session.get("cost"))
-    cost_row = (
-        f'<div class="row"><span class="ic">💰</span><span>'
-        f'<span class="label">Cost</span><span class="value">{cost}</span></span></div>'
-        if cost
-        else ""
-    )
+
+    def info_row(icon: str, label: str, value: str | None) -> str:
+        if not value:
+            return ""
+        return (
+            f'<div class="row"><span class="ic">{icon}</span><span>'
+            f'<span class="label">{label}</span><span class="value">{value}</span></span></div>'
+        )
+
+    cost_row = info_row("💰", "Cost", pretty_cost(session.get("cost")))
+    paid_row = info_row("💳", "Paid by", session.get("paid_by"))
 
     st.markdown(
         f"""
@@ -287,6 +303,7 @@ def render_card(session: dict | None) -> None:
             <div class="row"><span class="ic">⏰</span>
                 <span><span class="label">Time</span><span class="value">{pretty_time(session.get("time"))}</span></span></div>
             {cost_row}
+            {paid_row}
         </div>
         """,
         unsafe_allow_html=True,
@@ -323,10 +340,14 @@ def render_session_form(key: str, session: dict | None = None) -> None:
             date = st.date_input("Date", value=parse_date(session.get("date")), key=f"d_{key}")
         with col2:
             time = st.time_input("Time", value=parse_time(session.get("time")), key=f"t_{key}")
-        cost = st.number_input(
-            "Cost (₽)", min_value=0.0, step=100.0,
-            value=float(session.get("cost") or 0), format="%.0f", key=f"cost_{key}",
-        )
+        colc, colp = st.columns(2)
+        with colc:
+            cost = st.number_input(
+                "Cost (₽)", min_value=0.0, step=100.0,
+                value=float(session.get("cost") or 0), format="%.0f", key=f"cost_{key}",
+            )
+        with colp:
+            paid_by = st.text_input("Paid by", value=session.get("paid_by") or "", key=f"p_{key}")
         note = st.text_input("Note (court no., etc.) — optional", value=session.get("note") or "", key=f"n_{key}")
 
         if is_edit:
@@ -341,10 +362,10 @@ def render_session_form(key: str, session: dict | None = None) -> None:
         venue = custom.strip() or choice
         try:
             if is_edit:
-                update_session(session["id"], date, time, venue, cost, note.strip())
+                update_session(session["id"], date, time, venue, cost, paid_by.strip(), note.strip())
                 st.success("Saved ✅")
             else:
-                add_session(date, time, venue, cost, note.strip())
+                add_session(date, time, venue, cost, paid_by.strip(), note.strip())
                 st.success("Session added ✅")
             st.rerun()
         except Exception as exc:  # noqa: BLE001
@@ -388,6 +409,27 @@ def render_login() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# UI: shared upcoming-sessions list
+# --------------------------------------------------------------------------- #
+def render_upcoming_list(rows: list[dict], heading: str, empty_text: str) -> None:
+    st.markdown(f"**{heading}**")
+    if not rows:
+        if empty_text:
+            st.caption(empty_text)
+        return
+    for s in rows:
+        line = f"**{short_date(s.get('date'))}**, {pretty_time(s.get('time'))} — {s.get('venue')}"
+        extras = " · ".join(
+            x for x in [
+                pretty_cost(s.get("cost")),
+                (f"paid by {s['paid_by']}" if s.get("paid_by") else None),
+                s.get("note"),
+            ] if x
+        )
+        st.markdown(line + (f"  \n_{extras}_" if extras else ""))
+
+
+# --------------------------------------------------------------------------- #
 # UI: booking tab
 # --------------------------------------------------------------------------- #
 def render_booking(sessions: list[dict]) -> None:
@@ -416,16 +458,9 @@ def render_booking(sessions: list[dict]) -> None:
         st.caption("Opens bc-newliga.ru with your date selected. Complete payment on their site.")
 
     st.divider()
-    st.markdown("**📋 Upcoming sessions**")
-    ups = upcoming_sessions(sessions)
-    if not ups:
-        st.caption("No upcoming sessions yet.")
-        return
-    for s in ups:
-        cost = pretty_cost(s.get("cost"))
-        line = f"**{short_date(s.get('date'))}**, {pretty_time(s.get('time'))} — {s.get('venue')}"
-        extras = " · ".join(x for x in [cost, s.get("note")] if x)
-        st.markdown(line + (f"  \n_{extras}_" if extras else ""))
+    render_upcoming_list(
+        upcoming_sessions(sessions), "📋 Upcoming sessions", "No upcoming sessions yet."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -454,7 +489,11 @@ def main() -> None:
     tab_match, tab_book = st.tabs(["🏸 Next Match", "📅 Book a Court"])
 
     with tab_match:
-        render_card(next_session(sessions))
+        ups = upcoming_sessions(sessions)
+        render_card(ups[0] if ups else None)
+        if len(ups) > 1:
+            st.write("")
+            render_upcoming_list(ups[1:], "📋 More upcoming sessions", "")
         st.divider()
         if st.session_state.is_admin:
             st.success("Admin Mode 🔓")
