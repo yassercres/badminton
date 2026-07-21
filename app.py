@@ -1,15 +1,15 @@
 """
-🏸 Badminton Group — Next Match tracker.
+🏸 BadBoyz Club — badminton sessions tracker.
 
 A small Streamlit app for a closed group of 6 players.
-- Anyone with the link can VIEW the next match venue, date and time.
-- Only someone who enters the correct admin password can EDIT those details.
+- Anyone with the link can VIEW the next match and the upcoming schedule.
+- Someone who enters the admin password can add / edit / delete sessions.
 
-Data lives in the Supabase table `badminton_schedule` (columns: date, time, venue).
-The app keeps a single "next match" row: it edits the existing row if there is one,
-otherwise it inserts one.
+Single-table model: `badminton_schedule` holds MANY rows, one per future
+session (columns: date, time, venue, cost, note). The "next match" is simply the
+soonest upcoming row (date >= today). See db/upgrade_schedule.sql.
 
-Secrets (password + Supabase creds) come from .streamlit/secrets.toml — see secrets.toml.example.
+Secrets (password + Supabase creds) come from .streamlit/secrets.toml.
 """
 
 from __future__ import annotations
@@ -24,14 +24,12 @@ from supabase import create_client, Client
 # Config
 # --------------------------------------------------------------------------- #
 TABLE = "badminton_schedule"
-BOOKINGS_TABLE = "bookings"
 
 # The group plays at a couple of fixed venues. Name -> Yandex Maps link.
 VENUES: dict[str, str] = {
     "Luzhniki NLBC": "https://yandex.com/maps/-/CTV8AIP5",
     "Park Kultury NLBC": "https://yandex.com/maps/-/CTV8MYoM",
 }
-OTHER_OPTION = "Other (type manually)"
 
 # Court-booking (bc-newliga.ru). Each venue uses a different booking widget, so
 # it has its own URL-parameter prefix and studio id. We inject the chosen date
@@ -72,10 +70,7 @@ st.markdown(
       }
 
       /* Hero header */
-      .hero {
-          text-align: center;
-          margin-bottom: 1.2rem;
-      }
+      .hero { text-align: center; margin-bottom: 1.2rem; }
       .hero .emoji { font-size: 2.4rem; line-height: 1; }
       .hero .title { font-size: 1.6rem; font-weight: 800; margin-top: 0.2rem; letter-spacing: -0.01em; }
       .hero .sub { color: #64748b; font-size: 0.95rem; margin-top: 0.1rem; }
@@ -90,19 +85,17 @@ st.markdown(
           position: relative;
           overflow: hidden;
       }
+      .match-card.empty { background: linear-gradient(150deg,#475569 0%,#334155 100%); box-shadow:none; }
       .match-card::after {
           content: "🏸";
-          position: absolute;
-          right: -0.4rem; bottom: -0.8rem;
+          position: absolute; right: -0.4rem; bottom: -0.8rem;
           font-size: 6rem; opacity: 0.10; transform: rotate(-18deg);
       }
       .countdown-pill {
           display: inline-block;
-          background: rgba(255,255,255,0.18);
-          color: #ffffff;
+          background: rgba(255,255,255,0.18); color: #ffffff;
           font-size: 0.8rem; font-weight: 700;
-          padding: 0.28rem 0.7rem; border-radius: 999px;
-          margin-bottom: 1rem;
+          padding: 0.28rem 0.7rem; border-radius: 999px; margin-bottom: 1rem;
       }
       .row { display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.9rem; }
       .row:last-child { margin-bottom: 0; }
@@ -130,60 +123,49 @@ def get_client() -> Client:
     return create_client(url, key)
 
 
-def load_match() -> dict | None:
-    """Read the current 'next match' row, or None if the table is empty."""
+def load_sessions() -> list[dict]:
+    """All sessions, soonest first."""
     client = get_client()
-    resp = client.table(TABLE).select("*").order("id").limit(1).execute()
-    return resp.data[0] if resp.data else None
+    resp = client.table(TABLE).select("*").order("date").order("time").execute()
+    return resp.data or []
 
 
-def save_match(venue: str, match_date: dt.date, match_time: dt.time) -> None:
-    """Update the existing row if there is one, otherwise insert a new one."""
-    client = get_client()
-    payload = {
+def upcoming_sessions(sessions: list[dict]) -> list[dict]:
+    today = dt.date.today().isoformat()
+    return [s for s in sessions if (s.get("date") or "") >= today]
+
+
+def next_session(sessions: list[dict]) -> dict | None:
+    up = upcoming_sessions(sessions)
+    return up[0] if up else None
+
+
+def _session_payload(date: dt.date, time: dt.time, venue: str, cost: float, note: str) -> dict:
+    return {
+        "date": date.isoformat(),
+        "time": time.strftime("%H:%M:%S"),
         "venue": venue,
-        "date": match_date.isoformat(),
-        "time": match_time.strftime("%H:%M:%S"),
+        "cost": float(cost) if cost else None,
+        "note": note or None,
     }
-    existing = load_match()
-    if existing and "id" in existing:
-        client.table(TABLE).update(payload).eq("id", existing["id"]).execute()
-    else:
-        client.table(TABLE).insert(payload).execute()
 
 
-def load_bookings() -> tuple[list[dict], bool]:
-    """Return (rows, table_ready). table_ready is False if `bookings` is missing."""
-    try:
-        client = get_client()
-        resp = client.table(BOOKINGS_TABLE).select("*").order("match_date").execute()
-        return resp.data or [], True
-    except Exception:  # noqa: BLE001 — table not created yet, or transient error
-        return [], False
+def add_session(date: dt.date, time: dt.time, venue: str, cost: float, note: str) -> None:
+    get_client().table(TABLE).insert(_session_payload(date, time, venue, cost, note)).execute()
 
 
-def add_booking(match_date: dt.date, venue: str, booked_by: str, note: str) -> None:
-    client = get_client()
-    client.table(BOOKINGS_TABLE).insert(
-        {
-            "match_date": match_date.isoformat(),
-            "venue": venue,
-            "booked_by": booked_by,
-            "note": note or None,
-        }
-    ).execute()
+def update_session(sid: int, date: dt.date, time: dt.time, venue: str, cost: float, note: str) -> None:
+    get_client().table(TABLE).update(_session_payload(date, time, venue, cost, note)).eq("id", sid).execute()
 
 
-def delete_booking(booking_id: int) -> None:
-    client = get_client()
-    client.table(BOOKINGS_TABLE).delete().eq("id", booking_id).execute()
+def delete_session(sid: int) -> None:
+    get_client().table(TABLE).delete().eq("id", sid).execute()
 
 
 # --------------------------------------------------------------------------- #
 # Formatting helpers
 # --------------------------------------------------------------------------- #
 def map_url(venue: str | None) -> str | None:
-    """Return the Yandex Maps link for a known venue, else None."""
     return VENUES.get((venue or "").strip())
 
 
@@ -211,6 +193,13 @@ def pretty_date(value: str | None) -> str:
         return str(value)
 
 
+def short_date(value: str | None) -> str:
+    try:
+        return dt.date.fromisoformat(value).strftime("%a, %d %b")
+    except (ValueError, TypeError):
+        return str(value or "TBD")
+
+
 def pretty_time(value: str | None) -> str:
     if not value:
         return "TBD"
@@ -220,8 +209,15 @@ def pretty_time(value: str | None) -> str:
         return str(value)
 
 
+def pretty_cost(value) -> str | None:
+    try:
+        v = float(value)
+    except (ValueError, TypeError):
+        return None
+    return f"₽{v:,.0f}" if v > 0 else None
+
+
 def countdown_label(value: str | None) -> str:
-    """A friendly 'Today / Tomorrow / In N days' badge for the match date."""
     if not value:
         return "Date to be confirmed"
     try:
@@ -251,138 +247,131 @@ def parse_time(value: str | None) -> dt.time:
         return dt.time(18, 0)
 
 
-def build_ics(match: dict | None) -> str | None:
-    """Build a calendar invite (.ics) with an alarm 12 hours before the match.
-
-    Once a player adds this to their phone calendar, the phone fires a native
-    reminder 12h before — no server or push infrastructure needed. Times are
-    "floating" (interpreted in the device's local timezone), which is what we
-    want since everyone plays in the same city.
-    """
-    match = match or {}
-    date, time = match.get("date"), match.get("time")
-    if not date or not time:
-        return None
-    try:
-        start = dt.datetime.combine(dt.date.fromisoformat(date), parse_time(time))
-    except (ValueError, TypeError):
-        return None
-
-    end = start + dt.timedelta(hours=2)
-    venue = match.get("venue") or "Badminton"
-    url = map_url(venue) or ""
-    local = lambda d: d.strftime("%Y%m%dT%H%M%S")  # noqa: E731 — floating local time
-    stamp = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-
-    lines = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "PRODID:-//BadBoyz Club//Badminton//EN",
-        "CALSCALE:GREGORIAN",
-        "METHOD:PUBLISH",
-        "BEGIN:VEVENT",
-        f"UID:{local(start)}-badboyz@club",
-        f"DTSTAMP:{stamp}",
-        f"DTSTART:{local(start)}",
-        f"DTEND:{local(end)}",
-        f"SUMMARY:\U0001F3F8 BadBoyz Badminton — {venue}",
-        f"LOCATION:{venue}",
-        f"DESCRIPTION:Next BadBoyz match at {venue}. {url}".strip(),
-        "BEGIN:VALARM",
-        "TRIGGER:-PT12H",
-        "ACTION:DISPLAY",
-        "DESCRIPTION:\U0001F3F8 Badminton in 12 hours!",
-        "END:VALARM",
-        "END:VEVENT",
-        "END:VCALENDAR",
-    ]
-    return "\r\n".join(lines) + "\r\n"
-
-
 # --------------------------------------------------------------------------- #
-# UI sections
+# UI: next-match card
 # --------------------------------------------------------------------------- #
-def render_card(match: dict | None) -> None:
-    match = match or {}
-    venue = match.get("venue") or "TBD"
+def render_card(session: dict | None) -> None:
+    if not session:
+        st.markdown(
+            """
+            <div class="match-card empty">
+                <span class="countdown-pill">No match scheduled</span>
+                <div class="row"><span class="ic">🗓️</span>
+                    <span><span class="label">Next match</span>
+                    <span class="value">Nothing booked yet</span></span></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    venue = session.get("venue") or "TBD"
     url = map_url(venue)
     venue_html = f'<a href="{url}" target="_blank">{venue} ↗</a>' if url else venue
+    cost = pretty_cost(session.get("cost"))
+    cost_row = (
+        f'<div class="row"><span class="ic">💰</span><span>'
+        f'<span class="label">Cost</span><span class="value">{cost}</span></span></div>'
+        if cost
+        else ""
+    )
 
     st.markdown(
         f"""
         <div class="match-card">
-            <span class="countdown-pill">{countdown_label(match.get("date"))}</span>
-            <div class="row">
-                <span class="ic">📍</span>
-                <span><span class="label">Venue</span><span class="value">{venue_html}</span></span>
-            </div>
-            <div class="row">
-                <span class="ic">📅</span>
-                <span><span class="label">Date</span><span class="value">{pretty_date(match.get("date"))}</span></span>
-            </div>
-            <div class="row">
-                <span class="ic">⏰</span>
-                <span><span class="label">Time</span><span class="value">{pretty_time(match.get("time"))}</span></span>
-            </div>
+            <span class="countdown-pill">{countdown_label(session.get("date"))}</span>
+            <div class="row"><span class="ic">📍</span>
+                <span><span class="label">Venue</span><span class="value">{venue_html}</span></span></div>
+            <div class="row"><span class="ic">📅</span>
+                <span><span class="label">Date</span><span class="value">{pretty_date(session.get("date"))}</span></span></div>
+            <div class="row"><span class="ic">⏰</span>
+                <span><span class="label">Time</span><span class="value">{pretty_time(session.get("time"))}</span></span></div>
+            {cost_row}
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # A clear, thumb-sized "directions" button under the card.
     if url:
         st.write("")
         st.link_button("📍 Get directions (Yandex Maps)", url, use_container_width=True)
 
-    # Calendar reminder — fires a native phone notification 12h before the match.
-    ics = build_ics(match)
-    if ics:
-        st.download_button(
-            "🔔 Add to calendar (reminds you 12h before)",
-            data=ics,
-            file_name="badboyz-match.ics",
-            mime="text/calendar",
-            use_container_width=True,
+
+# --------------------------------------------------------------------------- #
+# UI: admin session management
+# --------------------------------------------------------------------------- #
+def _venue_index(venue: str | None) -> int:
+    names = list(VENUES.keys())
+    return names.index(venue) if venue in names else 0
+
+
+def render_session_form(key: str, session: dict | None = None) -> None:
+    """A form to add (session=None) or edit an existing session."""
+    session = session or {}
+    names = list(VENUES.keys())
+    is_edit = bool(session)
+
+    with st.form(f"form_{key}", clear_on_submit=not is_edit):
+        choice = st.selectbox("Venue", names, index=_venue_index(session.get("venue")), key=f"v_{key}")
+        custom = st.text_input(
+            "…or type another venue (optional)",
+            value="" if (not session.get("venue") or session.get("venue") in names) else session["venue"],
+            key=f"c_{key}",
         )
-
-
-def render_admin_editor(match: dict | None) -> None:
-    match = match or {}
-    st.subheader("✏️ Update next match")
-
-    current_venue = match.get("venue") or ""
-    venue_names = list(VENUES.keys())
-    options = venue_names + [OTHER_OPTION]
-    default_index = venue_names.index(current_venue) if current_venue in venue_names else len(options) - 1
-
-    with st.form("edit_match"):
-        choice = st.selectbox("Venue", options, index=default_index)
-        # Only ask for free text when "Other" is picked.
-        custom_venue = ""
-        if choice == OTHER_OPTION:
-            custom_venue = st.text_input(
-                "Custom venue name",
-                value="" if current_venue in venue_names else current_venue,
-            )
-
         col1, col2 = st.columns(2)
         with col1:
-            match_date = st.date_input("Date", value=parse_date(match.get("date")))
+            date = st.date_input("Date", value=parse_date(session.get("date")), key=f"d_{key}")
         with col2:
-            match_time = st.time_input("Time", value=parse_time(match.get("time")))
-        submitted = st.form_submit_button("💾 Save changes")
+            time = st.time_input("Time", value=parse_time(session.get("time")), key=f"t_{key}")
+        cost = st.number_input(
+            "Cost (₽)", min_value=0.0, step=100.0,
+            value=float(session.get("cost") or 0), format="%.0f", key=f"cost_{key}",
+        )
+        note = st.text_input("Note (court no., etc.) — optional", value=session.get("note") or "", key=f"n_{key}")
 
-    if submitted:
-        venue = custom_venue.strip() if choice == OTHER_OPTION else choice
-        if not venue:
-            st.error("Please choose or enter a venue.")
-            return
+        if is_edit:
+            bcol1, bcol2 = st.columns(2)
+            save = bcol1.form_submit_button("💾 Save")
+            delete = bcol2.form_submit_button("🗑️ Delete")
+        else:
+            save = st.form_submit_button("➕ Add session")
+            delete = False
+
+    if save:
+        venue = custom.strip() or choice
         try:
-            save_match(venue, match_date, match_time)
-            st.success("Match details updated! ✅")
+            if is_edit:
+                update_session(session["id"], date, time, venue, cost, note.strip())
+                st.success("Saved ✅")
+            else:
+                add_session(date, time, venue, cost, note.strip())
+                st.success("Session added ✅")
             st.rerun()
-        except Exception as exc:  # noqa: BLE001 — surface any Supabase error to the admin
+        except Exception as exc:  # noqa: BLE001
             st.error(f"Could not save: {exc}")
+    if delete:
+        try:
+            delete_session(session["id"])
+            st.warning("Session deleted.")
+            st.rerun()
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not delete: {exc}")
+
+
+def render_admin_manage(sessions: list[dict]) -> None:
+    ups = upcoming_sessions(sessions)
+    st.subheader("🗓️ Manage sessions")
+
+    with st.expander("➕ Add a session", expanded=not ups):
+        render_session_form("add")
+
+    if ups:
+        st.caption("Edit or remove upcoming sessions:")
+        for s in ups:
+            cost = pretty_cost(s.get("cost"))
+            label = f"{short_date(s.get('date'))} · {s.get('venue')}" + (f" · {cost}" if cost else "")
+            with st.expander("✏️ " + label):
+                render_session_form(f"edit_{s['id']}", s)
 
 
 def render_login() -> None:
@@ -398,85 +387,45 @@ def render_login() -> None:
                 st.error("Incorrect password.")
 
 
-def render_booking(match: dict | None) -> None:
-    match = match or {}
+# --------------------------------------------------------------------------- #
+# UI: booking tab
+# --------------------------------------------------------------------------- #
+def render_booking(sessions: list[dict]) -> None:
     st.subheader("📅 Book a court")
     st.caption(
         "Pick a venue and date, open the booking site (with your date pre-filled), "
-        "and pay there. Then log it below so everyone can see what's booked."
+        "and pay there. Then add it as a session (Admin Mode) so it shows up here."
     )
 
-    venue_names = list(VENUE_BOOKING.keys())
-    current_venue = match.get("venue")
-    v_index = venue_names.index(current_venue) if current_venue in venue_names else 0
+    names = list(VENUE_BOOKING.keys())
+    nxt = next_session(sessions)
+    default_date = parse_date(nxt.get("date")) if nxt else dt.date.today()
+    default_venue = _venue_index(nxt.get("venue")) if nxt else 0
 
     col1, col2 = st.columns(2)
     with col1:
-        venue = st.selectbox("Venue", venue_names, index=v_index, key="book_venue")
+        venue = st.selectbox("Venue", names, index=default_venue, key="book_venue")
     with col2:
-        date = st.date_input("Date", value=parse_date(match.get("date")), key="book_date")
+        date = st.date_input("Date", value=default_date, key="book_date")
 
     url = booking_url(venue, date)
     if url:
         st.link_button(
-            f"🎟️ Open booking page — {date.strftime('%d %b %Y')}",
-            url,
-            use_container_width=True,
+            f"🎟️ Open booking page — {date.strftime('%d %b %Y')}", url, use_container_width=True
         )
         st.caption("Opens bc-newliga.ru with your date selected. Complete payment on their site.")
 
     st.divider()
-    render_booking_records(match)
-
-
-def render_booking_records(match: dict | None) -> None:
-    match = match or {}
-    rows, ready = load_bookings()
-    if not ready:
-        st.info("Booking records aren't enabled yet — run `db/bookings.sql` in Supabase to turn this on.")
+    st.markdown("**📋 Upcoming sessions**")
+    ups = upcoming_sessions(sessions)
+    if not ups:
+        st.caption("No upcoming sessions yet.")
         return
-
-    venue_names = list(VENUE_BOOKING.keys())
-    cur = match.get("venue")
-    idx = venue_names.index(cur) if cur in venue_names else 0
-
-    with st.expander("✅ Log a booking (after you've paid)"):
-        with st.form("log_booking"):
-            bvenue = st.selectbox("Venue", venue_names, index=idx, key="log_venue")
-            bdate = st.date_input("Date", value=parse_date(match.get("date")), key="log_date")
-            who = st.text_input("Booked by")
-            note = st.text_input("Note (court no., time, cost…)", value="")
-            ok = st.form_submit_button("Save booking")
-        if ok:
-            if not who.strip():
-                st.error("Please add who booked it.")
-            else:
-                try:
-                    add_booking(bdate, bvenue, who.strip(), note.strip())
-                    st.success("Booking logged! ✅")
-                    st.rerun()
-                except Exception as exc:  # noqa: BLE001
-                    st.error(f"Could not save: {exc}")
-
-    st.markdown("**📋 Upcoming booked sessions**")
-    today = dt.date.today().isoformat()
-    upcoming = [r for r in rows if (r.get("match_date") or "") >= today]
-    if not upcoming:
-        st.caption("No upcoming bookings logged yet.")
-        return
-
-    for r in upcoming:
-        c1, c2 = st.columns([6, 1])
-        with c1:
-            sub = " · ".join(x for x in [r.get("booked_by"), r.get("note")] if x)
-            st.markdown(
-                f"**{pretty_date(r.get('match_date'))}** — {r.get('venue')}"
-                + (f"  \n_{sub}_" if sub else "")
-            )
-        with c2:
-            if st.session_state.get("is_admin") and st.button("🗑️", key=f"del_{r['id']}"):
-                delete_booking(r["id"])
-                st.rerun()
+    for s in ups:
+        cost = pretty_cost(s.get("cost"))
+        line = f"**{short_date(s.get('date'))}**, {pretty_time(s.get('time'))} — {s.get('venue')}"
+        extras = " · ".join(x for x in [cost, s.get("note")] if x)
+        st.markdown(line + (f"  \n_{extras}_" if extras else ""))
 
 
 # --------------------------------------------------------------------------- #
@@ -497,7 +446,7 @@ def main() -> None:
     )
 
     try:
-        match = load_match()
+        sessions = load_sessions()
     except Exception as exc:  # noqa: BLE001
         st.error(f"Couldn't reach the database: {exc}")
         st.stop()
@@ -505,11 +454,11 @@ def main() -> None:
     tab_match, tab_book = st.tabs(["🏸 Next Match", "📅 Book a Court"])
 
     with tab_match:
-        render_card(match)
+        render_card(next_session(sessions))
         st.divider()
         if st.session_state.is_admin:
             st.success("Admin Mode 🔓")
-            render_admin_editor(match)
+            render_admin_manage(sessions)
             if st.button("Log out"):
                 st.session_state.is_admin = False
                 st.rerun()
@@ -517,7 +466,7 @@ def main() -> None:
             render_login()
 
     with tab_book:
-        render_booking(match)
+        render_booking(sessions)
 
 
 if __name__ == "__main__":
