@@ -32,8 +32,8 @@ VENUES: dict[str, str] = {
 OTHER_OPTION = "Other (type manually)"
 
 st.set_page_config(
-    page_title="🏸 Badminton — Next Match",
-    page_icon="🏸",
+    page_title="BadBoyz Club — Next Match",
+    page_icon="assets/icon.png",  # custom app / tab / home-screen icon
     layout="centered",  # centered plays nicely on phones
     initial_sidebar_state="collapsed",
 )
@@ -191,6 +191,54 @@ def parse_time(value: str | None) -> dt.time:
         return dt.time(18, 0)
 
 
+def build_ics(match: dict | None) -> str | None:
+    """Build a calendar invite (.ics) with an alarm 12 hours before the match.
+
+    Once a player adds this to their phone calendar, the phone fires a native
+    reminder 12h before — no server or push infrastructure needed. Times are
+    "floating" (interpreted in the device's local timezone), which is what we
+    want since everyone plays in the same city.
+    """
+    match = match or {}
+    date, time = match.get("date"), match.get("time")
+    if not date or not time:
+        return None
+    try:
+        start = dt.datetime.combine(dt.date.fromisoformat(date), parse_time(time))
+    except (ValueError, TypeError):
+        return None
+
+    end = start + dt.timedelta(hours=2)
+    venue = match.get("venue") or "Badminton"
+    url = map_url(venue) or ""
+    local = lambda d: d.strftime("%Y%m%dT%H%M%S")  # noqa: E731 — floating local time
+    stamp = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//BadBoyz Club//Badminton//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "BEGIN:VEVENT",
+        f"UID:{local(start)}-badboyz@club",
+        f"DTSTAMP:{stamp}",
+        f"DTSTART:{local(start)}",
+        f"DTEND:{local(end)}",
+        f"SUMMARY:\U0001F3F8 BadBoyz Badminton — {venue}",
+        f"LOCATION:{venue}",
+        f"DESCRIPTION:Next BadBoyz match at {venue}. {url}".strip(),
+        "BEGIN:VALARM",
+        "TRIGGER:-PT12H",
+        "ACTION:DISPLAY",
+        "DESCRIPTION:\U0001F3F8 Badminton in 12 hours!",
+        "END:VALARM",
+        "END:VEVENT",
+        "END:VCALENDAR",
+    ]
+    return "\r\n".join(lines) + "\r\n"
+
+
 # --------------------------------------------------------------------------- #
 # UI sections
 # --------------------------------------------------------------------------- #
@@ -225,6 +273,17 @@ def render_card(match: dict | None) -> None:
     if url:
         st.write("")
         st.link_button("📍 Get directions (Yandex Maps)", url, use_container_width=True)
+
+    # Calendar reminder — fires a native phone notification 12h before the match.
+    ics = build_ics(match)
+    if ics:
+        st.download_button(
+            "🔔 Add to calendar (reminds you 12h before)",
+            data=ics,
+            file_name="badboyz-match.ics",
+            mime="text/calendar",
+            use_container_width=True,
+        )
 
 
 def render_admin_editor(match: dict | None) -> None:
@@ -289,7 +348,7 @@ def main() -> None:
         """
         <div class="hero">
             <div class="emoji">🏸</div>
-            <div class="title">Badminton Club</div>
+            <div class="title">BadBoyz Club</div>
             <div class="sub">Our next match</div>
         </div>
         """,
