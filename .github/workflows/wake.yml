@@ -4,16 +4,16 @@ name: Wake Streamlit App
 # "get this app back up" button on a schedule so the app stays live.
 on:
   schedule:
-    - cron: "0 */4 * * *"   # every 4 hours (UTC). Best-effort timing.
+    - cron: "0 */2 * * *"   # every 2 hours (UTC). Best-effort timing.
   workflow_dispatch: {}       # lets you run it manually from the Actions tab
 
 jobs:
   wake:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
