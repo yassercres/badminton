@@ -1,0 +1,26 @@
+name: Wake Streamlit App
+
+# Streamlit Community Cloud sleeps apps after inactivity. This clicks the
+# "get this app back up" button on a schedule so the app stays live.
+on:
+  schedule:
+    - cron: "0 */4 * * *"   # every 4 hours (UTC). Best-effort timing.
+  workflow_dispatch: {}       # lets you run it manually from the Actions tab
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r keepalive/requirements.txt
+
+      - name: Click the wake button if the app is asleep
+        env:
+          STREAMLIT_APP_URL: https://badboy.streamlit.app/
+        run: python keepalive/wake.py

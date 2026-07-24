@@ -1,0 +1,3 @@
+# Deps for the GitHub Actions "wake" job only — kept separate from the app's
+# requirements.txt so the Streamlit deploy stays lean.
+selenium>=4.20
